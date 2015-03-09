@@ -41,6 +41,7 @@ www.codebender.cc
 
 #include <Arduino.h> // Arduino 1.0 or greater is required
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include <SPI.h>
 #include <Ethernet.h>
@@ -51,14 +52,35 @@ www.codebender.cc
 // CRLF characters to terminate lines/handshakes in headers.
 #define CRLF "\r\n"
 
+typedef struct {
+    bool isMasked;
+    bool isFinal;
+    byte opcode;
+    byte mask[4];
+    word length;
+    char *data;
+} Frame;
+
+// Frame.
+static Frame frame;
+static byte frameCapacity = 0; // Maximum amount of data the frame can accept.
+
+// Implement a way to "printf" to the socket. Also provided is a PSTR-able method for additional (and delicious) RAM savings.
+class WebSocketWritable {
+public:
+    virtual byte send(char *str, word length);
+    word printf(const char *format, ...);
+    word printf_P(const __FlashStringHelper *format, ...);
+};
+
 class WebSocket;
-class WebSocketServer {
+class WebSocketServer : public WebSocketWritable {
 public:
     // Constructor.
-    WebSocketServer(const char *urlPrefix = "/", int inPort = 80, byte maxConnections = 4);
+    WebSocketServer(const char *urlPrefix = "/", int inPort = 80, byte maxConnections = 4, word maxFrameSize = 96);
     
     // Callback functions definition.
-    typedef void DataCallback(WebSocket &socket, char *socketString, byte frameLength);
+    typedef void DataCallback(WebSocket &socket, char *socketString, word frameLength);
     typedef void Callback(WebSocket &socket);
     
     // Callbacks
@@ -76,11 +98,11 @@ public:
     byte connectionCount();
 
     // Broadcast to all connected clients.
-    void send(char *str, byte length);
+    byte send(char *str, word length);
 
 private:
     EthernetServer m_server;
-    const char *m_socket_urlPrefix;
+    const char *m_server_urlPrefix;
     int m_maxConnections;
 
     byte m_connectionCount;
@@ -96,7 +118,7 @@ friend class WebSocket;
     Callback *onDisconnect;
 };
 
-class WebSocket {
+class WebSocket : public WebSocketWritable {
     WebSocketServer *m_server;
 
 public:
@@ -107,13 +129,14 @@ public:
     bool isConnected();
 	
     // Embeds data in frame and sends to client.
-    bool send(char *str, byte length);
+    byte send(char *str, word length);
 
     // Handle incoming data.
     void listen();
 
 private:
-    EthernetClient client;
+    EthernetClient m_socket;
+
     enum State {DISCONNECTED, CONNECTED} state;
 
     // Discovers if the client's header is requesting an upgrade to a

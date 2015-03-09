@@ -4,21 +4,27 @@
 
 //#define DEBUG 1
 
-struct Frame {
-    bool isMasked;
-    bool isFinal;
-    byte opcode;
-    byte mask[4];
-    byte length;
-    char data[64];
-} frame;
+#ifndef htons
+#define htons(x) ( ((x)<<8) | (((x)>>8)&0xFF) )
+#endif
 
-WebSocketServer::WebSocketServer(const char *urlPrefix, int inPort, byte maxConnections) :
+static bool initialised = false;
+
+WebSocketServer::WebSocketServer(const char *urlPrefix, int inPort, byte maxConnections, word maxFrameSize) :
     m_server(inPort),
-    m_socket_urlPrefix(urlPrefix),
+    m_server_urlPrefix(urlPrefix),
     m_maxConnections(maxConnections),
     m_connectionCount(0)
 {
+    // This buffer is shared between WebSocketServer contexts:
+    if( maxFrameSize > frameCapacity )
+    {
+        if( initialised )
+            delete frame.data;
+        frameCapacity = maxFrameSize;
+        frame.data = new char[maxFrameSize];
+    }
+
     m_connections = new WebSocket*[ m_maxConnections ];
     for( byte x=0; x < m_maxConnections; x++ )
         m_connections[x] = NULL;
@@ -47,11 +53,45 @@ byte WebSocketServer::connectionCount()
     return m_connectionCount;
 }
 
-void WebSocketServer::send( char *data, byte length )
+byte WebSocketServer::send( char *data, word length )
 {
-    m_server.write((uint8_t) 0x81); // Txt frame opcode
-    m_server.write((uint8_t) length); // Length of data
-    m_server.write( (const uint8_t *)data, length );
+    if( 1 != m_server.write((uint8_t) 0x81) ) // Txt frame opcode
+        return 0;
+    if( length > 125 )
+    {
+        if( 1 != m_server.write((uint8_t) 0x7E) ) // 16-bit length follows
+            return 0;
+	word lenNBO = htons(length);
+        if( 2 != m_server.write((const uint8_t *)&lenNBO, 2) ) // Length of data in a word, endian swapped.
+            return 0;
+    }
+    else
+    {
+        if( 1 != m_server.write((uint8_t) length) ) // Length of data in a byte
+            return 0;
+    }
+
+    return m_server.write( (const uint8_t *)data, length );
+}
+
+word WebSocketWritable::printf(const char *format, ...)
+{
+        // Re(ab)use the 'frame' buffer to conserve RAM:
+        va_list ap;
+        va_start(ap, format);
+        frame.length = vsnprintf(frame.data, frameCapacity, format, ap);
+        va_end(ap);
+        return send(frame.data, frame.length);
+}
+
+word WebSocketWritable::printf_P(const __FlashStringHelper *format, ...)
+{
+        // Re(ab)use the 'frame' buffer to conserve RAM:
+        va_list ap;
+        va_start(ap, format);
+        frame.length = vsnprintf_P(frame.data, frameCapacity, (const char *)format, ap);
+        va_end(ap);
+        return send(frame.data, frame.length);
 }
 
 void WebSocketServer::listen() {
@@ -100,7 +140,7 @@ void WebSocketServer::listen() {
 
 WebSocket::WebSocket( WebSocketServer *server, EthernetClient cli ) :
     m_server(server),
-    client(cli)
+    m_socket(cli)
 {
     if( doHandshake() )
     {
@@ -116,7 +156,7 @@ WebSocket::WebSocket( WebSocketServer *server, EthernetClient cli ) :
 
 void WebSocket::listen()
 {
-    if( !client.available() )
+    if( !m_socket.available() )
         return;
 
     if( !getFrame() )
@@ -137,9 +177,9 @@ void WebSocket::disconnectStream() {
     if( m_server->onDisconnect )
         m_server->onDisconnect(*this);
 
-    client.flush();
+    m_socket.flush();
     delay(1);
-    client.stop();
+    m_socket.stop();
 }
 
 bool WebSocket::doHandshake() {
@@ -154,7 +194,7 @@ bool WebSocket::doHandshake() {
     bool hasKey = false;
 
     byte counter = 0;
-    while ((bite = client.read()) != -1) {
+    while ((bite = m_socket.read()) != -1) {
         temp[counter++] = bite;
 
         if (counter > 2 && (bite == '\n' || counter >= 127)) { // EOL got, or too long header. temp should now contain a header string
@@ -196,7 +236,7 @@ bool WebSocket::doHandshake() {
         base64_encode(temp, (char*)hash, 20);
 	char buf[132];
         snprintf_P( buf, sizeof(buf), PSTR("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n"), temp );
-	client.print( buf );
+	m_socket.print( buf );
     } else {
         // Nope, failed handshake. Disconnect
 #ifdef DEBUG
@@ -221,45 +261,54 @@ bool WebSocket::getFrame() {
     byte bite;
     
     // Get opcode
-    bite = client.read();
+    bite = m_socket.read();
         
     frame.opcode = bite & 0xf; // Opcode
     frame.isFinal = bite & 0x80; // Final frame?
     // Determine length (only accept <= 64 for now)
-    bite = client.read();
+    bite = m_socket.read();
     frame.length = bite & 0x7f; // Length of payload
-    if (frame.length > 64) {
+    if( frame.length == 126 )
+    {
+	// 16-bit length:
+	uint8_t *len8 = (uint8_t*)&frame.length;
+	len8[1] = m_socket.read();
+	len8[0] = m_socket.read();
+    }
+
+    if (frame.length > frameCapacity) {
 #ifdef DEBUG
         Serial.print(F("Too big frame to handle. Length: "));
         Serial.println(frame.length);
 #endif
-        client.write((uint8_t) 0x08);
-        client.write((uint8_t) 0x02);
-        client.write((uint8_t) 0x03);
-        client.write((uint8_t) 0xf1);
+        m_socket.write((uint8_t) 0x08);
+        m_socket.write((uint8_t) 0x02);
+        m_socket.write((uint8_t) 0x03);
+        m_socket.write((uint8_t) 0xf1);
         return false;
     }
     // Client should always send mask, but check just to be sure
     frame.isMasked = bite & 0x80;
     if (frame.isMasked) {
-        frame.mask[0] = client.read();
-        frame.mask[1] = client.read();
-        frame.mask[2] = client.read();
-        frame.mask[3] = client.read();
+        frame.mask[0] = m_socket.read();
+        frame.mask[1] = m_socket.read();
+        frame.mask[2] = m_socket.read();
+        frame.mask[3] = m_socket.read();
     }
 
     // Clear any frame data that may have come previously
-    memset(frame.data, 0, sizeof(frame.data)/sizeof(char));
+    //memset(frame.data, 0, frameCapacity);
 
     
     // Get message bytes and unmask them if necessary
     for (int i = 0; i < frame.length; i++) {
         if (frame.isMasked) {
-            frame.data[i] = client.read() ^ frame.mask[i % 4];
+            frame.data[i] = m_socket.read() ^ frame.mask[i % 4];
         } else {
-            frame.data[i] = client.read();
+            frame.data[i] = m_socket.read();
         }
     }
+    frame.data[frame.length] = '\0';
     
     //
     // Frame complete!
@@ -270,10 +319,10 @@ bool WebSocket::getFrame() {
 #ifdef DEBUG
         Serial.println(F("Non-final frame, doesn't handle that."));
 #endif
-        client.print((uint8_t) 0x08);
-        client.write((uint8_t) 0x02);
-        client.write((uint8_t) 0x03);
-        client.write((uint8_t) 0xf1);
+        m_socket.print((uint8_t) 0x08);
+        m_socket.write((uint8_t) 0x02);
+        m_socket.write((uint8_t) 0x03);
+        m_socket.write((uint8_t) 0xf1);
         return false;
     }
 
@@ -290,7 +339,7 @@ bool WebSocket::getFrame() {
 #ifdef DEBUG
             Serial.println(F("Close frame received. Closing in answer."));
 #endif
-            client.write((uint8_t) 0x08);
+            m_socket.write((uint8_t) 0x08);
             return false;
             break;
             
@@ -305,20 +354,32 @@ bool WebSocket::getFrame() {
     return true;
 }
 
-
-
-bool WebSocket::send(char *data, byte length)
+byte WebSocket::send( char *data, word length )
 {
-    if( state != CONNECTED )
+    if( CONNECTED != state )
     {
 #ifdef DEBUG
         Serial.println(F("No connection to client, no data sent."));
 #endif
-        return false;
+        return 0;
     }
 
-    client.write((uint8_t) 0x81); // Txt frame opcode
-    client.write((uint8_t) length); // Length of data
-    client.write( (const uint8_t *)data, length );
-    return true;
+    if( 1 != m_socket.write((uint8_t) 0x81) ) // Txt frame opcode
+        return 0;
+    if( length > 125 )
+    {
+        if( 1 != m_socket.write((uint8_t) 0x7E) ) // 16-bit length follows
+            return 0;
+	word lenNBO = htons(length);
+        if( 2 != m_socket.write((const uint8_t *)&lenNBO, 2) ) // Length of data in a word, endian swapped.
+            return 0;
+    }
+    else
+    {
+        if( 1 != m_socket.write((uint8_t) length) ) // Length of data in a byte
+            return 0;
+    }
+
+    return m_socket.write( (const uint8_t *)data, length );
 }
+
