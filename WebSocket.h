@@ -123,7 +123,7 @@ protected:
     char *checksum( char *key=NULL );
 
     // Update state
-    void setStatus( State state ) { printStatus(); m_state = state; printStatus(); }
+    void setStatus( State state ) { m_state = state; }
 };
 
 #endif
