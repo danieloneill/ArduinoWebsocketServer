@@ -1,44 +1,3 @@
-/*
-Websocket-Arduino, a simple websocket implementation for Arduino
-Copyright 2012 Per Ejeklint
-
-Based on previous implementations by
-Copyright 2010 Ben Swanson
-and
-Copyright 2010 Randall Brewer
-and
-Copyright 2010 Oliver Smith
-
-Some code and concept based off of Webduino library
-Copyright 2009 Ben Combee, Ran Talbott
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-
--------------
-Now based off version 13
-http://datatracker.ietf.org/doc/rfc6455/?include_text=1
-
-Modified by Alexandros Baltas, 2013
-www.codebender.cc
-
-*/
-
 #include <Arduino.h> // Arduino 1.0 or greater is required
 #include <stdlib.h>
 #include <stdarg.h>
@@ -46,8 +5,14 @@ www.codebender.cc
 #include <SPI.h>
 #include <Ethernet.h>
 
+#include "WebSocketWritable.h"
+
 #ifndef WEBSOCKET_H_
 #define WEBSOCKET_H_
+
+#ifndef htons
+#define htons(x) ( ((x)<<8) | (((x)>>8)&0xFF) )
+#endif
 
 // CRLF characters to terminate lines/handshakes in headers.
 #define CRLF "\r\n"
@@ -62,93 +27,113 @@ typedef struct {
 } Frame;
 
 // Frame.
-static Frame frame;
-static byte frameCapacity = 0; // Maximum amount of data the frame can accept.
+extern Frame frame;
 
-// Implement a way to "printf" to the socket. Also provided is a PSTR-able method for additional (and delicious) RAM savings.
-class WebSocketWritable {
-public:
-    virtual byte send(char *str, word length);
-    word printf(const char *format, ...);
-    word printf_P(const __FlashStringHelper *format, ...);
-};
-
-class WebSocket;
-class WebSocketServer : public WebSocketWritable {
-public:
-    // Constructor.
-    WebSocketServer(const char *urlPrefix = "/", int inPort = 80, byte maxConnections = 4, word maxFrameSize = 96);
-    
-    // Callback functions definition.
-    typedef void DataCallback(WebSocket &socket, char *socketString, word frameLength);
-    typedef void Callback(WebSocket &socket);
-    
-    // Callbacks
-    void registerDataCallback(DataCallback *callback);
-    void registerConnectCallback(Callback *callback);
-    void registerDisconnectCallback(Callback *callback);
-    
-    // Start tlistening for connections.
-    void begin();
-    
-    // Main listener for incoming data. Should be called from the loop.
-    void listen();
-
-    // Connection count
-    byte connectionCount();
-
-    // Broadcast to all connected clients.
-    byte send(char *str, word length);
-
-private:
-    EthernetServer m_server;
-    const char *m_server_urlPrefix;
-    int m_maxConnections;
-
-    byte m_connectionCount;
-
-    // Pointer array of clients:
-    WebSocket **m_connections;
-
-protected:
-friend class WebSocket;
-    // Pointer to the callback function the user should provide
-    DataCallback *onData;
-    Callback *onConnect;
-    Callback *onDisconnect;
-};
+// Shared with WebSocketServer
+extern word frameCapacity; // Maximum amount of data the frame can accept.
+extern bool initialised;
 
 class WebSocket : public WebSocketWritable {
-    WebSocketServer *m_server;
+public:
+    typedef enum {DISCONNECTED=0, HANDSHAKE=1, CONNECTED=2} State;
+
+protected:
+    typedef void Callback(WebSocket &socket, void *opaque);
+    typedef void DataCallback(WebSocket &socket, char *socketString, word frameLength, void *opaque);
+
+    Callback *onConnect;
+    Callback *onDisconnect;
+    DataCallback *onData;
+
+    void *m_connectOpaque;
+    void *m_disconnectOpaque;
+    void *m_dataOpaque;
+
+    EthernetClient m_socket;
+
+    // Connection state:
+    State m_state;
+
+    // Are we transmitting keep-alive packets? (PING)
+    unsigned long m_keepaliveInterval;
+
+    // If no traffic is received in this many MS, close the socket.
+    unsigned long m_timeout;
+
+    // Just to keep track of the last timestamp.
+    unsigned long m_lastPacketTime, m_lastPingTime;
 
 public:
-    // Constructor.
-    WebSocket(WebSocketServer *server, EthernetClient cli);
+    WebSocket(word maxFrameSize = 96);
+    ~WebSocket();
+
+    void registerDataCallback(DataCallback *callback, void *opaque=NULL) { onData = callback; m_dataOpaque = opaque; }
+    void registerConnectCallback(Callback *callback, void *opaque=NULL) { onDisconnect = callback; m_connectOpaque = opaque; }
+    void registerDisconnectCallback(Callback *callback, void *opaque=NULL) { onDisconnect = callback; m_disconnectOpaque = opaque; }
+
+    bool connect(const char *url);
 
     // Are we connected?
-    bool isConnected();
-	
+    bool connected() { return m_socket.connected(); }
+
+    // Outbound may be in HANDSHAKE, inbound will be eitheir DISCONNECTED or CONNECTED
+    bool status() { return 0 + m_state; }
+
+    // To get things like host/port info:
+    EthernetClient socket() { return m_socket; }
+
     // Embeds data in frame and sends to client.
     byte send(char *str, word length);
 
     // Handle incoming data.
     void listen();
 
+    // Disconnect user gracefully.
+    void close();
+
+    // Set to keepalive frequency in milliseconds, or 0 for "don't transmit".
+    void setKeepalive(unsigned int interval);
+
+    // Set to connection timeout in milliseconds, or 0 for "never timeout". It still can if the underlying socket dies.
+    void setTimeout(unsigned int deadline);
+
+    // Called also by WebSocketServer:
+    static void initialise( word maxFrameSize );
+
+    // Free as much RAM as possible, requiring WebSocket::initialise() to be called before resuming use.
+    static void deinitialise();
+
+    void printStatus() {
+		Serial.print(F("State: "));
+		if( m_state == DISCONNECTED )
+			Serial.println(F("DISCONNECTED (0)"));
+		else if( m_state == CONNECTED )
+			Serial.println(F("CONNECTED (1)"));
+		else if( m_state == HANDSHAKE)
+			Serial.println(F("HANDSHAKE (2)"));
+	}
+
 private:
-    EthernetClient m_socket;
-
-    enum State {DISCONNECTED, CONNECTED} state;
-
     // Discovers if the client's header is requesting an upgrade to a
     // websocket connection.
-    bool doHandshake();
-    
+    bool outboundHandshake(); // Called for receiving end of handshake.
+
+    // Outbound handshake:
+    bool sendOutboundHandshakeRequest(const char *url, const char *host, word port);
+
     // Reads a frame from client. Returns false if user disconnects, 
     // or unhandled frame is received. Server must then disconnect, or an error occurs.
     bool getFrame();
 
-    // Disconnect user gracefully.
-    void disconnectStream();
+    // Calculate if the socket is timed-out or not.
+    bool checkTimeout();
+
+protected:
+    // Generate a Base64-encoded SHA1 SUM of the static key, optionally prefixed by a provided key:
+    char *checksum( char *key=NULL );
+
+    // Update state
+    void setStatus( State state ) { printStatus(); m_state = state; printStatus(); }
 };
 
 #endif
