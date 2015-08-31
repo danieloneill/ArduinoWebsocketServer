@@ -51,8 +51,8 @@ public:
     ~WebSocketServer();
 
     // Callbacks
-    void registerConnectCallback(Callback *callback, void *opaque) { onConnect = callback; m_connectOpaque = opaque; }
-    void registerDisconnectCallback(Callback *callback, void *opaque) { onDisconnect = callback; m_disconnectOpaque = opaque; }
+    void registerConnectCallback(Callback *callback, void *opaque=NULL) { onConnect = callback; m_connectOpaque = opaque; }
+    void registerDisconnectCallback(Callback *callback, void *opaque=NULL) { onDisconnect = callback; m_disconnectOpaque = opaque; }
 
     // Start listening for connections.
     void begin() { m_server.begin(); }

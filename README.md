@@ -98,6 +98,11 @@ void loop()
 
 # API
 
+## enum WebSocket::State {DISCONNECTED=0, HANDSHAKE=1, CONNECTED=2}
+`As read by **status()** object method.`
+
+--
+
 ## void WebSocket *ws = new WebSocket( word [Maximum frame size] )
 `Constructor for a WebSocket object. Optional parameter allows to increase maximum frame size to specified value.`
 
@@ -131,7 +136,14 @@ void loop()
 --
 
 ## bool WebSocket::connected()
-`Returns **true** if the socket is connected, otherise **false**.`
+* Returns **true** if the socket is connected, otherise **false**.`
+
+--
+
+## WebSocket::State WebSocket::status()
+`Connection status, which may be one of WebSocket::DISCONNECTED, WebSocket::HANDSHAKE, or WebSocket::CONNECTED.`
+
+* Returns WebSocket::State enumerated value.
 
 --
 
@@ -217,7 +229,7 @@ void loop()
 --
 
 ## byte WebSocketServer::connectionCount()
-`Returns a count of current connections to this context object.`
+* Returns a count of current connections to this context object.
 
 --
 

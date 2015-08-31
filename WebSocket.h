@@ -77,7 +77,7 @@ public:
     bool connected() { return m_socket.connected(); }
 
     // Outbound may be in HANDSHAKE, inbound will be eitheir DISCONNECTED or CONNECTED
-    bool status() { return 0 + m_state; }
+    State status() { return m_state; }
 
     // To get things like host/port info:
     EthernetClient socket() { return m_socket; }
@@ -102,16 +102,6 @@ public:
 
     // Free as much RAM as possible, requiring WebSocket::initialise() to be called before resuming use.
     static void deinitialise();
-
-    void printStatus() {
-		Serial.print(F("State: "));
-		if( m_state == DISCONNECTED )
-			Serial.println(F("DISCONNECTED (0)"));
-		else if( m_state == CONNECTED )
-			Serial.println(F("CONNECTED (1)"));
-		else if( m_state == HANDSHAKE)
-			Serial.println(F("HANDSHAKE (2)"));
-	}
 
 private:
     // Discovers if the client's header is requesting an upgrade to a
